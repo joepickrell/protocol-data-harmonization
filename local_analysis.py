@@ -1,8 +1,7 @@
 """Local-only Analysis for SecureGenomics Protocol - data haromonization"""
 
-from typing import Dict
-from encode import encode_vcf
-import os, mimetypes, gzip, subprocess
+from typing import Dict, Any
+import os, mimetypes, gzip, subprocess, uuid
 
 
 def is_gzipped(filepath: str) -> bool:
@@ -206,43 +205,7 @@ def analyze_local(input_vcf_file_path: str, output_vcf_file_path: str, protocol_
             'variants': []
         }
     
-    # Format results (this simulates the decrypt step)
-    results = {
-        'analysis_type': 'Local Alzheimer Disease Allele Frequency Analysis',
-        'sample_count': 1,  # Single sample analysis
-        'protocol_simulation': 'encode -> compute -> decrypt (without encryption)',
-        'variants': []
-    }
-    
-    # Process each variant
-    for i, variant in enumerate(TARGET_VARIANTS):
-        if i < len(encoded_data):
-            genotype_count = encoded_data[i]
-            allele_frequency = calculate_allele_frequency(genotype_count)
-            
-            # Get variant information
-            variant_info = get_variant_info(variant)
-            
-            # Calculate risk assessment
-            risk_level = "Unknown"
-            if genotype_count == 0:
-                risk_level = "No risk alleles"
-            elif genotype_count == 1:
-                risk_level = "One risk allele (heterozygous)"
-            elif genotype_count == 2:
-                risk_level = "Two risk alleles (homozygous)"
-            
-            results['variants'].append({
-                'gene': variant_info['gene'],
-                'variant_id': variant_info['variant_id'],
-                'position': variant_info['position'],
-                'risk_allele': variant_info['risk_allele'],
-                'clinical_significance': variant_info['clinical_significance'],
-                'genotype_count': genotype_count,
-                'allele_frequency': allele_frequency,
-                'risk_level': risk_level,
-                'raw_encoding': genotype_count  # Shows what the FHE circuit would process
-            })
+
     
     return results
 
@@ -276,7 +239,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 2:
         input_vcf_path = sys.argv[1]
         output_vcf_path = sys.argv[2]
-        results = analyze_local(input_vcf_path, output_vcf_path)
-        print_analysis_results(results)
+        uuid = uuid.uuid4()
+        ok, msg, newpath = is_supported_genetic_file(input_vcf_path, uuid, b37_position_file="data/GSA-b37.pos.gz", b38_position_file="data/GSA-b38.pos.gz")
+        if ok:
+            try:
+                os.rename(newpath, output_vcf_path)
+                print(f"File successfully renamed to: {output_vcf_path}")
+            except Exception as e:
+                print(f"Error renaming file: {e}")   
+        print(msg)
     else:
         print("Usage: python local_analysis.py <input_vcf_file_path> <output_vcf_file_path>") 
