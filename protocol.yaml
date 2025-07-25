@@ -1,12 +1,11 @@
-name: "breast-cancer-allele-frequency"
+name: "data harmonization"
 version: "1.0.0"
-description: "Secure multi-party computation of allele frequencies for breast cancer susceptibility variants"
+description: "data harmonization protocol"
 author: "SecureGenomics Research Team"
 contact: "research@securegenomics.com"
 
 # Computation modes supported
 modes:
-  - aggregated  # Supports FHE aggregated computation
   - local       # Supports local-only analysis
 
 # FHE parameters for aggregated computation

@@ -1,118 +1,185 @@
-"""Local-only Analysis for SecureGenomics Protocol - Alzheimer's Disease Allele Frequency Analysis."""
+"""Local-only Analysis for SecureGenomics Protocol - data haromonization"""
 
-from typing import Dict, Any, List, Union, Tuple
-from encode import encode_vcf, TARGET_VARIANTS
+from typing import Dict
+from encode import encode_vcf
+import os, mimetypes, gzip, subprocess
 
-# Mapping of variants to their clinical information
-VARIANT_INFO = {
-    "rs429358": {
-        "gene": "APOE",
-        "variant_id": "rs429358",
-        "position": "19:44908684",
-        "risk_allele": "C",
-        "clinical_significance": "APOE ε4 defining SNP - 3-12x increased AD risk"
-    },
-    "rs7412": {
-        "gene": "APOE", 
-        "variant_id": "rs7412",
-        "position": "19:44908822",
-        "risk_allele": "T",
-        "clinical_significance": "APOE ε2 defining SNP - protective variant"
-    },
-    "rs2075650": {
-        "gene": "TOMM40",
-        "variant_id": "rs2075650", 
-        "position": "19:44892362",
-        "risk_allele": "G",
-        "clinical_significance": "2-4x higher AD risk, linked to APOE"
-    },
-    "rs199768005": {
-        "gene": "APOE",
-        "variant_id": "rs199768005",
-        "position": "19:44909057", 
-        "risk_allele": "A",
-        "clinical_significance": "APOE rare variant - pathogenic significance"
-    },
-    "rs6857": {
-        "gene": "NECTIN2",
-        "variant_id": "rs6857",
-        "position": "19:44888997",
-        "risk_allele": "A", 
-        "clinical_significance": "Age-at-onset modifier"
-    },
-    # Coordinate-based mappings (for backup specifications)
-    ("19", 44908684, "C"): {
-        "gene": "APOE",
-        "variant_id": "rs429358",
-        "position": "19:44908684",
-        "risk_allele": "C",
-        "clinical_significance": "APOE ε4 defining SNP - 3-12x increased AD risk"
-    },
-    ("19", 44908822, "T"): {
-        "gene": "APOE",
-        "variant_id": "rs7412", 
-        "position": "19:44908822",
-        "risk_allele": "T",
-        "clinical_significance": "APOE ε2 defining SNP - protective variant"
-    },
-    ("19", 44892362, "G"): {
-        "gene": "TOMM40",
-        "variant_id": "rs2075650",
-        "position": "19:44892362", 
-        "risk_allele": "G",
-        "clinical_significance": "2-4x higher AD risk, linked to APOE"
-    },
-    ("19", 44909057, "A"): {
-        "gene": "APOE",
-        "variant_id": "rs199768005",
-        "position": "19:44909057",
-        "risk_allele": "A",
-        "clinical_significance": "APOE rare variant - pathogenic significance"
-    },
-    ("19", 44888997, "A"): {
-        "gene": "NECTIN2", 
-        "variant_id": "rs6857",
-        "position": "19:44888997",
-        "risk_allele": "A",
-        "clinical_significance": "Age-at-onset modifier"
-    }
-}
 
-def get_variant_info(variant: Union[str, Tuple]) -> Dict[str, str]:
-    """Get clinical information for a variant."""
-    if variant in VARIANT_INFO:
-        return VARIANT_INFO[variant]
+def is_gzipped(filepath: str) -> bool:
+    try:
+        with open(filepath, "rb") as f:
+            magic = f.read(2)
+            return magic == b'\x1f\x8b'
+    except Exception:
+        return False
+
+def open_file(filepath):
+    if is_gzipped(filepath):
+        return gzip.open(filepath, "rt", encoding="utf-8", errors="ignore")
+    return open(filepath, "r", encoding="utf-8", errors="ignore")
+
+def is_vcf(filepath):
+    """
+    Check if a file is a valid VCF using bcftools view.
+    """
+    try:
+        subprocess.run(
+            ["bcftools", "view", "-Ov", filepath],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def convert_gvcf_to_vcf(input_file, output_file):
+    cmd = (
+        f"bcftools norm -m - {input_file} | "
+        f"bcftools view -i 'ALT!=\"<NON_REF>\" && GT!=\"0/0\"' -Oz -o {output_file}"
+    )
+    subprocess.run(cmd, shell=True, check=True)
+    subprocess.run(f"bcftools index {output_file}", shell=True, check=True)
+    return output_file
+
+def is_gvcf(vcf_file, sample_lines=100):
+    with open_file(vcf_file) as f:
+        count = 0
+        for line in f:
+            if line.startswith("#"):
+                continue
+            fields = line.strip().split("\t")
+            if len(fields) < 5:
+                continue
+            alt = fields[4]
+            if "<NON_REF>" in alt:
+                return True
+            count += 1
+            if count >= sample_lines:
+                break
+    return False
+        
+def load_positions(file_path):
+    with gzip.open(file_path, 'rt') as f:
+        return set(line.strip() for line in f if line.strip())
+
+
+def is_supported_genetic_file(filepath, uuid, b37_position_file, b38_position_file):
+    if not os.path.exists(filepath):
+        return False, "File not found.", None
+
+    mimetype, _ = mimetypes.guess_type(filepath)
+    if mimetype and not (mimetype.startswith("text") or mimetype == "application/octet-stream"):
+        return False, f"Rejected MIME type: {mimetype}", None
+
+    b37_positions = load_positions(b37_position_file)
+    b38_positions = load_positions(b38_position_file)
+
+    if is_vcf(filepath):
+        if is_gvcf(filepath):
+            print("Detected gVCF, converting to VCF...")
+            filepath = convert_gvcf_to_vcf(filepath, uuid)
+        newpath = fix_vcf_main_chromosomes_to_chr(filepath, uuid)
+        build = detect_genome_build(newpath, b37_positions, b38_positions)
+
+        if build == "b37":
+            #lifted_path = liftover_b37_to_b38_crossmap(newpath, uuid)
+            return True, "VCF file detected as b37.", newpath
+        elif build == "b38":
+            return True, "VCF file detected as b38.", newpath
+        else:
+            return False, "Genome build ambiguous, unable to process.", None
+    # if is_23andme(filepath):
+    #     convert_23andme_to_vcf(filepath, uuid)
+
+    return False, "Unsupported file format. Must be a VCF file.", None
+
+def detect_genome_build(vcf_file, b37_positions_set, b38_positions_set, threshold_ratio=5):
+    result = subprocess.run(
+        ["bcftools", "query", "-f", "%CHROM\t%POS\n", vcf_file],
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True
+    )
+
+    vcf_positions = set()
+    for line in result.stdout.strip().splitlines():
+        chrom, pos = line.split("\t")
+        key = f"{chrom}\t{pos}"
+        vcf_positions.add(key)
+
+    matches_b37 = len(vcf_positions & b37_positions_set)
+    matches_b38 = len(vcf_positions & b38_positions_set)
+
+    print(f"Matched {matches_b37} positions to b37, {matches_b38} to b38.")
+
+    if matches_b37 > threshold_ratio * matches_b38:
+        return "b37"
+    elif matches_b38 > threshold_ratio * matches_b37:
+        return "b38"
     else:
-        # Default info for unknown variants
-        return {
-            "gene": "Unknown",
-            "variant_id": str(variant),
-            "position": str(variant),
-            "risk_allele": "Unknown",
-            "clinical_significance": "Unknown variant"
-        }
+        return "ambiguous"
 
-def calculate_allele_frequency(genotype_count: int, total_samples: int = 1) -> float:
+def fix_vcf_main_chromosomes_to_chr(filepath, uuid):
     """
-    Calculate allele frequency from genotype count.
-    
-    Args:
-        genotype_count: 0 (ref/ref), 1 (ref/alt), or 2 (alt/alt)
-        total_samples: Number of samples (for single sample analysis = 1)
-    
-    Returns:
-        Allele frequency of the alternate allele
+    Converts main chromosomes (1-22, X, Y, MT) to 'chr*' style if needed.
+    Raises error if mixed styles are found.
+    Always outputs to {uuid}.vcf.gz when valid.
     """
-    if total_samples == 0:
-        return 0.0
-    
-    # For a single sample, convert genotype count to allele frequency
-    # 0 genotypes = 0/2 alleles = 0.0 frequency
-    # 1 genotype = 1/2 alleles = 0.5 frequency  
-    # 2 genotypes = 2/2 alleles = 1.0 frequency
-    return genotype_count / 2.0
+    main_chr = {str(i) for i in range(1, 23)} | {"X", "Y", "MT"}
+    main_chr_chr = {f"chr{i}" for i in range(1, 23)} | {"chrX", "chrY", "chrM"}
+    output_filepath = f"{uuid}.vcf.gz"
 
-def analyze_local(vcf_file_path: str, protocol_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    # Extract chromosome names
+    result = subprocess.run(
+        ["bcftools", "query", "-f", "%CHROM\n", filepath],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+        text=True
+    )
+    chroms = set(result.stdout.strip().splitlines())
+    main_present = {c for c in chroms if c in main_chr or c in main_chr_chr}
+
+    # Detect style
+    in_chr_style = {c for c in main_present if c in main_chr_chr}
+    in_nochr_style = {c for c in main_present if c in main_chr}
+
+    if in_chr_style and in_nochr_style:
+        raise ValueError(f"❌ Mixed main chromosome styles detected: chr* = {in_chr_style}, no-chr = {in_nochr_style}")
+
+    if in_chr_style:
+        print("Main chromosomes already in chr* style. Copying to output.")
+        subprocess.run([
+            "bcftools", "view", "-Oz",
+            "-o", output_filepath,
+            filepath
+        ], check=True)
+        subprocess.run(["bcftools", "index", "-f", output_filepath], check=True)
+        return output_filepath
+
+    if in_nochr_style:
+        print(f"Converting main chromosomes to chr* style → {output_filepath}")
+        mapping_file = f"{uuid}_chrom_map.txt"
+        with open(mapping_file, "w") as f:
+            for c in chroms:
+                if c in main_chr:
+                    new_c = "chrM" if c == "MT" else f"chr{c}"
+                    f.write(f"{c}\t{new_c}\n")
+        subprocess.run([
+            "bcftools", "annotate",
+            "--rename-chrs", mapping_file,
+            "-Oz", "-o", output_filepath, filepath
+        ], check=True)
+        subprocess.run(["bcftools", "index", "-f", output_filepath], check=True)
+        os.remove(mapping_file)
+        return output_filepath
+
+    print("No main chromosomes found")
+    raise ValueError(f"❌ No main chromosome styles detected: chr* = {in_chr_style}, no-chr = {in_nochr_style}")
+
+
+def analyze_local(input_vcf_file_path: str, output_vcf_file_path: str, protocol_config: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     Perform local-only analysis without encryption.
     
@@ -206,9 +273,10 @@ def print_analysis_results(results: Dict[str, Any]) -> None:
 if __name__ == "__main__":
     # Example usage
     import sys
-    if len(sys.argv) > 1:
-        vcf_path = sys.argv[1]
-        results = analyze_local(vcf_path)
+    if len(sys.argv) > 2:
+        input_vcf_path = sys.argv[1]
+        output_vcf_path = sys.argv[2]
+        results = analyze_local(input_vcf_path, output_vcf_path)
         print_analysis_results(results)
     else:
-        print("Usage: python local_analysis.py <vcf_file_path>") 
+        print("Usage: python local_analysis.py <input_vcf_file_path> <output_vcf_file_path>") 
