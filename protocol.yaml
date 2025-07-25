@@ -1,0 +1,17 @@
+name: "breast-cancer-allele-frequency"
+version: "1.0.0"
+description: "Secure multi-party computation of allele frequencies for breast cancer susceptibility variants"
+author: "SecureGenomics Research Team"
+contact: "research@securegenomics.com"
+
+# Computation modes supported
+modes:
+  - aggregated  # Supports FHE aggregated computation
+  - local       # Supports local-only analysis
+
+# FHE parameters for aggregated computation
+fhe_params:
+  scheme: "BFV"
+  poly_modulus_degree: 8192
+  coeff_modulus_bits: [60, 40, 40, 60]
+  plain_modulus: 1032193

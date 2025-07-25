@@ -1,0 +1,7 @@
+# FHE libraries (replace with actual implementations)
+# tenseal>=0.3.0
+# pyseal>=3.7.0
+
+# Data processing
+pyyaml>=6.0 
+tenseal>=0.3.0
