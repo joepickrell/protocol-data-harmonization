@@ -58,10 +58,110 @@ def is_gvcf(vcf_file, sample_lines=100):
                 break
     return False
         
+def detect_23andme_v_ancestry(input_path):
+    """
+    Detects if a tsv is in 23andme or ancestry style
+    23andme-style means 4 columns and chr names like X Y MT
+    ancestry-style means 5 columns and chr names like 23, 24, 25
+    Output: '23andme', 'ancestry', 'undetermined'
+    """
+    sharedchrs = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22"}
+    ttamchrs = {"X", "Y", "MT"}
+    ancchrs = {"23", "24", "25"}
+    sharedcount= 0
+    ttcount = 0
+    anccount = 0
+    fourfieldcount = 0
+    fivefieldcount = 0
+    with open_file(input_path) as fin:
+        for line in fin:
+            if line.startswith("#") or line.lower().startswith("rsid"):
+                continue
+            fields = line.strip().split("\t")
+            if len(fields) == 4:
+                fourfieldcount = fourfieldcount+1
+            elif len(fields) == 5:
+                fivefieldcount = fivefieldcount+1
+            else:
+                return 'undetermined'
+            chr = fields[1]
+            if chr in sharedchrs:
+                sharedcount = sharedcount+1
+            elif chr in ttamchrs:
+                ttcount = ttcount+1
+            elif chr in ancchrs:
+                anccount = anccount+1
+    if ttcount > 0 and anccount ==0 and fivefieldcount ==0:
+        print("Detected 23andMe format")
+        return '23andme'
+    elif anccount >0 and ttcount ==0 and fourfieldcount ==0:
+        print("Detected ancestry format")
+        return 'ancestry'
+    return 'undetermined'
+
+def detect_genome_build_tsv(input_path, b37_positions_set, b38_positions_set, threshold_ratio=5):
+
+    tsv_positions = set()
+    with open_file(input_path) as fin:
+        for line in fin:
+            if line.startswith("#") or line.lower().startswith("rsid"):
+                continue
+            chrom, pos = line.strip().split("\t")[1:3]
+            key = f"chr{chrom}\t{pos}"
+            tsv_positions.add(key)
+
+    matches_b37 = len(tsv_positions & b37_positions_set)
+    matches_b38 = len(tsv_positions & b38_positions_set)
+
+    print(f"Matched {matches_b37} positions to b37, {matches_b38} to b38.")
+
+    if matches_b37 > threshold_ratio * matches_b38:
+        return "b37"
+    elif matches_b38 > threshold_ratio * matches_b37:
+        return "b38"
+    else:
+        return "ambiguous"
+
 def load_positions(file_path):
     with gzip.open(file_path, 'rt') as f:
         return set(line.strip() for line in f if line.strip())
 
+def convert_ancestry_to_23andme_format(input_path, uuid):
+    """
+    Converts AncestryDNA format file to 23andMe-style format.
+    Output columns: rsid, chromosome, position, genotype
+    """
+    chrom_map = {"23": "X", "24": "Y", "25": "X"} # 25 is PAR
+    output_path = f"{uuid}.converted.txt"
+    with open_file(input_path) as fin, open(output_path, "w") as fout:
+        fout.write("# This file was converted from AncestryDNA format to 23andMe-style format\n")
+        fout.write("# rsid\tchromosome\tposition\tgenotype\n")
+
+        for line in fin:
+            if line.startswith("#") or line.lower().startswith("rsid"):
+                continue
+            fields = line.strip().split()
+            if len(fields) != 5:
+                continue
+            rsid, chrom, pos, allele1, allele2 = fields
+            chrom = chrom_map.get(chrom, chrom)
+            if allele1 =="0" or allele2 =="0":
+                continue
+            genotype = allele1 + allele2
+            fout.write(f"{rsid}\t{chrom}\t{pos}\t{genotype}\n")
+    return output_path
+
+def is_tsv(filepath):
+    try:
+        with open_file(filepath) as f:
+            for line in f:
+                if line.startswith("# rsid") or line.startswith("rs"):
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 4 and parts[0].startswith("rs"):
+                        return True
+        return False
+    except Exception:
+        return False
 
 def is_supported_genetic_file(filepath, uuid, b37_position_file, b38_position_file):
     if not os.path.exists(filepath):
@@ -88,6 +188,34 @@ def is_supported_genetic_file(filepath, uuid, b37_position_file, b38_position_fi
             return True, "VCF file detected as b38.", newpath
         else:
             return False, "Genome build ambiguous, unable to process.", None
+    if is_tsv(filepath):
+        type = detect_23andme_v_ancestry(filepath)
+        if type == "undetermined":
+            return False, "Unable to determine file format", None
+        build = detect_genome_build_tsv(filepath, b37_positions, b38_positions)
+        if build == "ambiguous":
+            return False, "Unable to determine genome build", None
+        if type == "23andme" and build =="b37":
+            #vcfpath = convert_23_to_vcf(filepath, uuid, b37_genome_file)
+            #newpath = fix_vcf_main_chromosomes_to_chr(vcfpath, uuid)
+            #lifted_path = liftover_b37_to_b38_crossmap(newpath, uuid)
+            return True, "23andMe file detected as b37", filepath
+        elif type == "23andme" and build =="b38":
+            #vcfpath = convert_23_to_vcf(filepath, uuid, b38_genome_file)
+            #newpath = fix_vcf_main_chromosomes_to_chr(vcfpath, uuid)
+            return True, "23andMe file detected as b38.", filepath
+        elif type == "ancestry" and build =="b37":
+            ttstylepath = convert_ancestry_to_23andme_format(filepath, uuid)
+            #vcfpath = convert_23_to_vcf(ttstylepath, uuid, b37_genome_file)
+            #newpath = fix_vcf_main_chromosomes_to_chr(vcfpath, uuid)
+            #lifted_path = liftover_b37_to_b38_crossmap(newpath, uuid)
+            return True, "Ancestry file detected as b37", ttstylepath
+        elif type == "ancestry" and build =="b38":
+            ttstylepath = convert_ancestry_to_23andme_format(filepath, uuid)
+            #vcfpath = convert_23_to_vcf(ttstylepath, uuid, b38_genome_file)
+            #newpath = fix_vcf_main_chromosomes_to_chr(vcfpath, uuid)
+            return True, "Ancestry file detected as b38.", ttstylepath
+        return False, "Unsupported file format. Must be a VCF or TSV file.", None
     # if is_23andme(filepath):
     #     convert_23andme_to_vcf(filepath, uuid)
 
